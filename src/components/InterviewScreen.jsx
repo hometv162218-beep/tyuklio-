@@ -4,33 +4,62 @@ import './InterviewScreen.css'
 function InterviewScreen({ sessionData, onComplete }) {
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0)
   const [recording, setRecording] = useState(false)
-  const [timeLeft, setTimeLeft] = useState(0)
+  const [questionTimeLeft, setQuestionTimeLeft] = useState(0)
+  const [totalTimeLeft, setTotalTimeLeft] = useState(0)
   const [uploading, setUploading] = useState(false)
   const [analyzing, setAnalyzing] = useState(false)
   const [cameraReady, setCameraReady] = useState(false)
+  const [recordingStopped, setRecordingStopped] = useState(false)
 
   const videoRef = useRef(null)
   const mediaRecorderRef = useRef(null)
   const audioChunksRef = useRef([])
   const streamRef = useRef(null)
-  const timerRef = useRef(null)
+  const questionTimerRef = useRef(null)
+  const totalTimerRef = useRef(null)
+  const totalInterviewTimeRef = useRef(sessionData.duration_seconds || 300)
 
   const questions = sessionData.questions || []
   const currentQuestion = questions[currentQuestionIndex]
+  const totalQuestions = questions.length
+  const timePerQuestion = Math.floor(totalInterviewTimeRef.current / totalQuestions)
 
   useEffect(() => {
     startCamera()
+    setTotalTimeLeft(totalInterviewTimeRef.current)
+
     return () => {
       stopCamera()
-      if (timerRef.current) clearInterval(timerRef.current)
+      if (questionTimerRef.current) clearInterval(questionTimerRef.current)
+      if (totalTimerRef.current) clearInterval(totalTimerRef.current)
     }
   }, [])
 
   useEffect(() => {
-    if (cameraReady && currentQuestion) {
+    if (cameraReady && currentQuestion && !recordingStopped) {
       startRecording()
     }
   }, [currentQuestionIndex, cameraReady])
+
+  useEffect(() => {
+    if (totalTimeLeft > 0 && !recording && !uploading) {
+      totalTimerRef.current = setInterval(() => {
+        setTotalTimeLeft((prev) => {
+          if (prev <= 1) {
+            clearInterval(totalTimerRef.current)
+            return 0
+          }
+          return prev - 1
+        })
+      }, 1000)
+    }
+
+    return () => {
+      if (totalTimerRef.current) {
+        clearInterval(totalTimerRef.current)
+      }
+    }
+  }, [recording, uploading])
 
   const startCamera = async () => {
     try {
@@ -59,6 +88,7 @@ function InterviewScreen({ sessionData, onComplete }) {
     if (!streamRef.current || recording) return
 
     audioChunksRef.current = []
+    setRecordingStopped(false)
 
     try {
       const mimeType = MediaRecorder.isTypeSupported('audio/webm')
@@ -82,11 +112,10 @@ function InterviewScreen({ sessionData, onComplete }) {
       mediaRecorderRef.current = mediaRecorder
       setRecording(true)
 
-      const questionTime = currentQuestion?.estimated_seconds || 90
-      setTimeLeft(questionTime)
+      setQuestionTimeLeft(timePerQuestion)
 
-      timerRef.current = setInterval(() => {
-        setTimeLeft((prev) => {
+      questionTimerRef.current = setInterval(() => {
+        setQuestionTimeLeft((prev) => {
           if (prev <= 1) {
             stopRecording()
             return 0
@@ -103,9 +132,10 @@ function InterviewScreen({ sessionData, onComplete }) {
     if (mediaRecorderRef.current && recording) {
       mediaRecorderRef.current.stop()
       setRecording(false)
-      if (timerRef.current) {
-        clearInterval(timerRef.current)
-        timerRef.current = null
+      setRecordingStopped(true)
+      if (questionTimerRef.current) {
+        clearInterval(questionTimerRef.current)
+        questionTimerRef.current = null
       }
     }
   }
@@ -115,6 +145,19 @@ function InterviewScreen({ sessionData, onComplete }) {
 
     const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' })
     await uploadAnswer(audioBlob)
+  }
+
+  const handleNextQuestion = () => {
+    if (!recordingStopped) return
+
+    if (uploading) return
+
+    if (currentQuestionIndex < questions.length - 1) {
+      setCurrentQuestionIndex(currentQuestionIndex + 1)
+      setRecordingStopped(false)
+    } else {
+      analyzeInterview()
+    }
   }
 
   const uploadAnswer = async (audioBlob) => {
@@ -134,12 +177,6 @@ function InterviewScreen({ sessionData, onComplete }) {
 
       if (!response.ok) {
         throw new Error('Failed to upload answer')
-      }
-
-      if (currentQuestionIndex < questions.length - 1) {
-        setCurrentQuestionIndex(currentQuestionIndex + 1)
-      } else {
-        await analyzeInterview()
       }
     } catch (error) {
       console.error('Error uploading answer:', error)
@@ -193,6 +230,10 @@ function InterviewScreen({ sessionData, onComplete }) {
             />
           </div>
         </div>
+        <div className="time-info">
+          <span className="total-time-label">Interview Time:</span>
+          <span className="total-time">{formatTime(totalTimeLeft)}</span>
+        </div>
       </div>
 
       <div className="interview-content">
@@ -210,7 +251,12 @@ function InterviewScreen({ sessionData, onComplete }) {
               Recording
             </div>
           )}
-          <div className="timer">{formatTime(timeLeft)}</div>
+          <div className="timer-container">
+            <div className="question-timer">
+              <span className="timer-label">Question Time</span>
+              <span className="timer-value">{formatTime(questionTimeLeft)}</span>
+            </div>
+          </div>
         </div>
 
         <div className="question-section">
@@ -218,14 +264,38 @@ function InterviewScreen({ sessionData, onComplete }) {
           <p className="question-text">{currentQuestion?.text}</p>
 
           {uploading && (
-            <div className="status-message">
+            <div className="status-message uploading">
+              <span className="upload-spinner"></span>
               Uploading your answer...
             </div>
           )}
 
           {analyzing && (
             <div className="status-message analyzing">
+              <span className="upload-spinner"></span>
               Analyzing your interview... This may take a moment.
+            </div>
+          )}
+
+          {recordingStopped && !uploading && !analyzing && (
+            <div className="action-section">
+              <p className="action-message">Recording complete!</p>
+              <button
+                className="next-button"
+                onClick={handleNextQuestion}
+                disabled={uploading}
+              >
+                {currentQuestionIndex < questions.length - 1
+                  ? 'Next Question'
+                  : 'Finish Interview'}
+              </button>
+            </div>
+          )}
+
+          {recording && (
+            <div className="recording-message">
+              <span className="recording-dot-small"></span>
+              Recording your answer...
             </div>
           )}
         </div>
